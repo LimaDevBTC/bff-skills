@@ -12,6 +12,9 @@
  *   bun run dog-intelligence.ts run --action diamond
  *   bun run dog-intelligence.ts run --action airdrop
  *   bun run dog-intelligence.ts run --action lth-sth
+ *   bun run dog-intelligence.ts run --action markets
+ *   bun run dog-intelligence.ts run --action multichain
+ *   bun run dog-intelligence.ts run --action bitcoin
  *   bun run dog-intelligence.ts install-packs
  */
 
@@ -118,6 +121,12 @@ async function doctor(): Promise<void> {
     checks.uptime_seconds = hd.uptime_seconds || 0;
   }
 
+  // Quick smoke-test new endpoints
+  const smokeTests = await fetchMultiple(["/markets", "/whale-alerts", "/multichain/stats"]);
+  checks.endpoint_markets = smokeTests["/markets"] ? "ok" : "unreachable";
+  checks.endpoint_whale_alerts = smokeTests["/whale-alerts"] ? "ok" : "unreachable";
+  checks.endpoint_multichain = smokeTests["/multichain/stats"] ? "ok" : "unreachable";
+
   const allOk = health.ok && checks.api_status === "healthy";
   out(
     allOk ? "success" : "error",
@@ -130,27 +139,36 @@ async function doctor(): Promise<void> {
 async function pulse(): Promise<void> {
   const raw = await fetchMultiple([
     "/dog-rune/stats",
-    "/price/kraken",
+    "/markets",
     "/metrics/realized-cap",
     "/forensic/summary",
     "/metrics/utxo-age",
   ]);
 
   const stats = raw["/dog-rune/stats"] as Record<string, unknown> | null;
-  const price = raw["/price/kraken"] as Record<string, unknown> | null;
+  const marketsData = raw["/markets"] as Record<string, unknown> | null;
   const realized = raw["/metrics/realized-cap"] as Record<string, unknown> | null;
   const forensic = raw["/forensic/summary"] as Record<string, unknown> | null;
   const utxoAge = raw["/metrics/utxo-age"] as Record<string, unknown> | null;
 
-  // Extract Kraken price
-  const krakenResult = price?.result as Record<string, Record<string, unknown>> | undefined;
+  // Extract price from aggregated markets (use Kraken as primary, fallback to first ticker)
+  const tickers = (marketsData?.tickers as Record<string, unknown>[]) ?? [];
+  const krakenTicker = tickers.find((t) => (t.market as string)?.toLowerCase() === "kraken");
+  const primaryTicker = krakenTicker ?? tickers[0] ?? null;
+  const currentPrice = primaryTicker ? (primaryTicker.price as number) : null;
+
+  // Aggregate volume across all exchanges
+  const totalVolumeUsd = tickers.reduce((s, t) => s + ((t.volumeUsd as number) || 0), 0);
+
+  // 24h price change from Kraken raw if available
+  const krakenRaw = raw["/price/kraken"] as Record<string, unknown> | null;
+  const krakenResult = krakenRaw?.result as Record<string, Record<string, unknown>> | undefined;
   const dogusd = krakenResult?.DOGUSD;
-  const currentPrice = dogusd?.c ? parseFloat((dogusd.c as string[])[0]) : null;
-  const volume24h = dogusd?.v ? parseFloat((dogusd.v as string[])[1]) : null;
-  const high24h = dogusd?.h ? parseFloat((dogusd.h as string[])[1]) : null;
-  const low24h = dogusd?.l ? parseFloat((dogusd.l as string[])[1]) : null;
   const openPrice = dogusd?.o ? parseFloat(dogusd.o as string) : null;
   const change24hPct = currentPrice && openPrice ? ((currentPrice - openPrice) / openPrice) * 100 : null;
+
+  // Exchange count
+  const exchangeCount = tickers.length;
 
   // MVRV interpretation
   const mvrv = realized?.mvrv_ratio as number | null;
@@ -168,14 +186,24 @@ async function pulse(): Promise<void> {
   const lthPct = utxoAge?.lth_percentage as number | null;
   const sthPct = utxoAge?.sth_percentage as number | null;
 
+  // Top exchanges by volume
+  const topExchanges = tickers
+    .sort((a, b) => ((b.volumeUsd as number) || 0) - ((a.volumeUsd as number) || 0))
+    .slice(0, 5)
+    .map((t) => ({
+      market: t.market,
+      pair: t.pair,
+      price_usd: t.price,
+      volume_usd: Math.round((t.volumeUsd as number) || 0),
+    }));
+
   out("success", "DOG pulse snapshot. Use this data for market analysis and signal generation.", {
     price: {
       usd: currentPrice,
       change_24h_pct: change24hPct ? +change24hPct.toFixed(2) : null,
-      high_24h: high24h,
-      low_24h: low24h,
-      volume_24h_dog: volume24h,
-      exchange: "Kraken",
+      total_volume_usd: Math.round(totalVolumeUsd),
+      exchange_count: exchangeCount,
+      top_exchanges: topExchanges,
     },
     fundamentals: {
       total_holders: stats?.totalHolders ?? null,
@@ -193,7 +221,7 @@ async function pulse(): Promise<void> {
       median_utxo_age_days: utxoAge?.median_age_days ? +(utxoAge.median_age_days as number).toFixed(1) : null,
     },
     forensic: {
-      diamond_paws: forensicStats?.diamond_hands ?? null,
+      diamond_paws: (forensicStats?.by_pattern as Record<string, number>)?.diamond_paws ?? forensicStats?.diamond_hands ?? null,
       dog_legends: (forensicStats?.by_pattern as Record<string, number>)?.dog_legend ?? null,
       paper_hands: (forensicStats?.by_pattern as Record<string, number>)?.paper_hands ?? null,
       retention_rate_pct: forensicStats?.retention_rate ? +(forensicStats.retention_rate as number).toFixed(2) : null,
@@ -204,24 +232,37 @@ async function pulse(): Promise<void> {
 
 async function whales(): Promise<void> {
   const raw = await fetchMultiple([
-    "/dog-rune/holders?limit=25",
-    "/dog-rune/transactions-kv",
+    "/whale-alerts",
+    "/dog-rune/top-holders",
   ]);
 
-  const holdersData = raw["/dog-rune/holders?limit=25"];
-  const txData = raw["/dog-rune/transactions-kv"] as Record<string, unknown> | null;
+  const whaleData = raw["/whale-alerts"] as Record<string, unknown> | null;
+  const topHoldersData = raw["/dog-rune/top-holders"] as Record<string, unknown> | null;
 
-  // Parse holders — may be array or object with holders key
-  let holders: Record<string, unknown>[] = [];
-  if (Array.isArray(holdersData)) {
-    holders = holdersData;
-  } else if (holdersData && typeof holdersData === "object") {
-    const hd = holdersData as Record<string, unknown>;
-    if (Array.isArray(hd.holders)) holders = hd.holders;
-    else if (Array.isArray(hd.top10Holders)) holders = hd.top10Holders;
-  }
+  // Parse whale alerts
+  const alerts = (whaleData?.alerts as Record<string, unknown>[]) ?? [];
 
-  // Format top holders
+  // Format alerts by severity
+  const criticalAlerts = alerts.filter((a) => a.severity === "CRITICAL");
+  const highAlerts = alerts.filter((a) => a.severity === "HIGH");
+
+  const formattedAlerts = alerts.slice(0, 25).map((a) => ({
+    chain: a.chain,
+    severity: a.severity,
+    amount_dog: a.total_dog_formatted ?? a.total_dog_moved,
+    amount_dog_raw: a.total_dog_moved,
+    usd_value: a.usd_value,
+    classification: a.classification,
+    type: a.type,
+    from: a.from_short ?? a.from,
+    to: a.to_short ?? a.to,
+    block: a.block_height,
+    time_ago: a.time_ago,
+    explorer_url: a.explorer_url,
+  }));
+
+  // Parse top holders from dedicated endpoint
+  const holders = (topHoldersData?.topHolders as Record<string, unknown>[]) ?? [];
   const topHolders = holders.slice(0, 25).map((h: Record<string, unknown>, i: number) => ({
     rank: h.rank ?? i + 1,
     address: h.address,
@@ -229,40 +270,27 @@ async function whales(): Promise<void> {
     utxo_count: h.utxo_count ?? null,
   }));
 
-  // Extract large transactions (> 1M DOG)
-  const WHALE_THRESHOLD = 1_000_000; // 1M DOG
-  const txs = txData?.transactions as Record<string, unknown>[] | undefined;
-  const whaleTxs = (txs || [])
-    .filter((tx: Record<string, unknown>) => {
-      const amount = tx.amount as number | undefined;
-      const totalDog = tx.total_dog as number | undefined;
-      const val = totalDog ?? (amount ? amount / 1e5 : 0);
-      return val >= WHALE_THRESHOLD;
-    })
-    .slice(0, 20)
-    .map((tx: Record<string, unknown>) => ({
-      txid: tx.txid ?? tx.tx_id,
-      block: tx.block_height ?? tx.block,
-      amount_dog: tx.total_dog ?? (typeof tx.amount === "number" ? tx.amount / 1e5 : null),
-      type: tx.type ?? "transfer",
-      timestamp: tx.timestamp ?? null,
-    }));
-
   // Concentration
   const top10Sum = topHolders.slice(0, 10).reduce((s, h) => s + ((h.balance_dog as number) || 0), 0);
   const totalSupply = 100_000_000_000;
   const top10Pct = (top10Sum / totalSupply) * 100;
 
-  out("success", "Whale intelligence report. Top holders and large recent movements.", {
+  out("success", "Whale intelligence report. Multi-chain large moves and top holder positions.", {
+    whale_alerts: {
+      total: whaleData?.total_alerts ?? alerts.length,
+      critical_count: criticalAlerts.length,
+      high_count: highAlerts.length,
+      threshold: whaleData?.threshold ?? "1M DOG",
+      chains_monitored: whaleData?.chains ?? ["bitcoin"],
+      dog_price_usd: whaleData?.dog_price_usd ?? null,
+      alerts_by_chain: whaleData?.alerts_by_chain ?? null,
+    },
+    recent_moves: formattedAlerts,
     top_holders: topHolders,
-    whale_transactions: whaleTxs,
-    whale_tx_count: whaleTxs.length,
     concentration: {
       top_10_supply_pct: +top10Pct.toFixed(2),
       top_10_total_dog: Math.round(top10Sum),
     },
-    threshold_dog: WHALE_THRESHOLD,
-    total_transactions_scanned: txs?.length ?? 0,
   });
 }
 
@@ -427,13 +455,167 @@ async function lthSth(): Promise<void> {
   });
 }
 
+async function markets(): Promise<void> {
+  const raw = await fetchMultiple([
+    "/markets",
+    "/price/kraken",
+  ]);
+
+  const marketsData = raw["/markets"] as Record<string, unknown> | null;
+  const krakenRaw = raw["/price/kraken"] as Record<string, unknown> | null;
+
+  const tickers = (marketsData?.tickers as Record<string, unknown>[]) ?? [];
+
+  // Sort by volume
+  const byVolume = [...tickers].sort((a, b) => ((b.volumeUsd as number) || 0) - ((a.volumeUsd as number) || 0));
+
+  // Aggregate stats
+  const totalVolumeUsd = byVolume.reduce((s, t) => s + ((t.volumeUsd as number) || 0), 0);
+  const prices = byVolume.map((t) => t.price as number).filter(Boolean);
+  const highestPrice = prices.length ? Math.max(...prices) : null;
+  const lowestPrice = prices.length ? Math.min(...prices) : null;
+  const spread = highestPrice && lowestPrice ? ((highestPrice - lowestPrice) / lowestPrice) * 100 : null;
+
+  // Kraken 24h data
+  const krakenResult = krakenRaw?.result as Record<string, Record<string, unknown>> | undefined;
+  const dogusd = krakenResult?.DOGUSD;
+  const high24h = dogusd?.h ? parseFloat((dogusd.h as string[])[1]) : null;
+  const low24h = dogusd?.l ? parseFloat((dogusd.l as string[])[1]) : null;
+  const open24h = dogusd?.o ? parseFloat(dogusd.o as string) : null;
+
+  const formattedTickers = byVolume.map((t) => ({
+    market: t.market,
+    pair: t.pair,
+    price_usd: t.price,
+    volume_usd: Math.round((t.volumeUsd as number) || 0),
+    volume_dog: t.volume,
+    spread_pct: t.spread,
+    trust_score: t.trustScore,
+    trade_url: t.tradeUrl,
+  }));
+
+  out("success", "Full market snapshot across all DOG exchanges.", {
+    aggregate: {
+      exchange_count: tickers.length,
+      total_volume_usd_24h: Math.round(totalVolumeUsd),
+      highest_price_usd: highestPrice,
+      lowest_price_usd: lowestPrice,
+      price_spread_pct: spread ? +spread.toFixed(4) : null,
+      high_24h_kraken: high24h,
+      low_24h_kraken: low24h,
+      open_24h_kraken: open24h,
+    },
+    exchanges: formattedTickers,
+  });
+}
+
+async function multichain(): Promise<void> {
+  const raw = await fetchMultiple([
+    "/multichain/stats",
+    "/multichain/holders?limit=10",
+  ]);
+
+  const statsData = raw["/multichain/stats"] as Record<string, unknown> | null;
+  const holdersData = raw["/multichain/holders?limit=10"] as Record<string, unknown> | null;
+
+  const chains = (statsData?.chains as Record<string, unknown>[]) ?? [];
+
+  // Parse per-chain stats
+  const chainSummaries = chains.map((c) => ({
+    chain: c.chain,
+    symbol: c.symbol,
+    price_usd: c.price_usd,
+    price_change_24h_pct: c.price_change_24h ? +(c.price_change_24h as number).toFixed(2) : null,
+    market_cap_usd: c.market_cap_usd ? Math.round(c.market_cap_usd as number) : null,
+    volume_24h_usd: c.volume_24h_usd ? Math.round(c.volume_24h_usd as number) : null,
+    liquidity_usd: c.liquidity_usd ? Math.round(c.liquidity_usd as number) : null,
+    holder_count: c.holder_count,
+    circulating_supply: c.circulating_supply,
+    contract: c.address,
+    last_updated: c.last_updated,
+  }));
+
+  // Top cross-chain holders
+  let holders: unknown[] = [];
+  if (Array.isArray(holdersData)) {
+    holders = holdersData.slice(0, 10);
+  } else if (holdersData && typeof holdersData === "object") {
+    const hd = holdersData as Record<string, unknown>;
+    if (Array.isArray(hd.holders)) holders = hd.holders.slice(0, 10);
+  }
+
+  out("success", "Cross-chain DOG intelligence. Stacks and Solana bridged supply overview.", {
+    aggregate: {
+      total_holders_all_chains: statsData?.total_holders ?? null,
+      total_market_cap_usd: statsData?.total_market_cap_usd ? Math.round(statsData.total_market_cap_usd as number) : null,
+      total_volume_24h_usd: statsData?.total_volume_24h_usd ? Math.round(statsData.total_volume_24h_usd as number) : null,
+      total_supply_all_chains: statsData?.total_supply_all_chains ?? null,
+      last_updated: statsData?.last_updated ?? null,
+    },
+    chains: chainSummaries,
+    top_holders: holders,
+  });
+}
+
+async function bitcoin(): Promise<void> {
+  const btcData = await get("/bitcoin");
+  if (!btcData.ok) {
+    out("error", "bitcoin", null, `Failed to fetch Bitcoin network data: HTTP ${btcData.status}`);
+    return;
+  }
+
+  const d = btcData.data as Record<string, unknown>;
+  const diff = d.difficultyAdjustment as Record<string, unknown> | undefined;
+  const hashrate = d.hashrate as Record<string, unknown> | undefined;
+  const mempool = d.mempool as Record<string, unknown> | undefined;
+  const fees = d.fees as Record<string, unknown> | undefined;
+  const blocks = d.blocks as Record<string, unknown>[] | undefined;
+  const latestBlock = blocks?.[0] as Record<string, unknown> | undefined;
+
+  // Current hashrate in EH/s
+  const currentHashrateRaw = hashrate?.currentHashrate as number | null;
+  const currentHashrateEH = currentHashrateRaw ? currentHashrateRaw / 1e18 : null;
+
+  // Fee recommendations
+  const feeRec = fees?.recommended as Record<string, unknown> | undefined;
+
+  out("success", "Bitcoin network status. Context for DOG L1 activity and on-chain conditions.", {
+    network: {
+      latest_block: latestBlock?.height ?? null,
+      latest_block_time: latestBlock?.timestamp ?? null,
+      hashrate_eh_s: currentHashrateEH ? +currentHashrateEH.toFixed(2) : null,
+      difficulty: hashrate?.currentDifficulty ? +(hashrate.currentDifficulty as number).toFixed(0) : null,
+    },
+    difficulty_adjustment: {
+      progress_pct: diff?.progressPercent ? +(diff.progressPercent as number).toFixed(2) : null,
+      estimated_change_pct: diff?.difficultyChange ? +(diff.difficultyChange as number).toFixed(2) : null,
+      blocks_remaining: diff?.remainingBlocks ?? null,
+      next_retarget_height: diff?.nextRetargetHeight ?? null,
+    },
+    mempool: {
+      tx_count: mempool?.count ?? null,
+      size_vb: mempool?.vsize ?? null,
+      total_fees_sat: mempool?.total_fee ?? null,
+    },
+    fees: {
+      fastest_sat_vb: feeRec?.fastestFee ?? null,
+      half_hour_sat_vb: feeRec?.halfHourFee ?? null,
+      hour_sat_vb: feeRec?.hourFee ?? null,
+      economy_sat_vb: feeRec?.economyFee ?? null,
+      minimum_sat_vb: feeRec?.minimumFee ?? null,
+    },
+  });
+}
+
 async function installPacks(): Promise<void> {
-  out("success", "No additional packages required. dog-intelligence uses fetch (built into Bun) and the DOG DATA REST API. Optionally set DOGDATA_API_KEY env var for higher rate limits (100 req/hr).", {
+  out("success", "No additional packages required. dog-intelligence uses fetch (built into Bun) and the DOG DATA REST API. Optionally set DOGDATA_API_KEY env var for higher rate limits.", {
     required_dependencies: [],
     optional: {
       env_var: "DOGDATA_API_KEY",
       get_key: "POST https://www.dogdata.xyz/api/keys/generate with {\"email\": \"...\", \"name\": \"...\"}",
       free_tier: "100 req/hr",
+      pro_tier: "5,000 req/hr",
+      enterprise_tier: "50,000 req/hr",
       public_tier: "20 req/hr (no key needed)",
     },
   });
@@ -467,8 +649,17 @@ async function main(): Promise<void> {
         case "lth-sth":
           await lthSth();
           break;
+        case "markets":
+          await markets();
+          break;
+        case "multichain":
+          await multichain();
+          break;
+        case "bitcoin":
+          await bitcoin();
+          break;
         default:
-          out("error", "Unknown action", null, `Unknown action: ${action}. Valid: pulse, whales, diamond, airdrop, lth-sth`);
+          out("error", "Unknown action", null, `Unknown action: ${action}. Valid: pulse, whales, diamond, airdrop, lth-sth, markets, multichain, bitcoin`);
       }
       break;
     case "install-packs":

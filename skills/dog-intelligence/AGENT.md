@@ -1,3 +1,9 @@
+---
+name: dog-intelligence-agent
+skill: dog-intelligence
+description: "Autonomous operation rules for DOG rune on-chain intelligence — read-only analytics with forensic profiling, multi-chain whale tracking, multi-exchange market data, and conviction metrics."
+---
+
 # dog-intelligence — Autonomous Operation Rules
 
 ## Decision Flow
@@ -31,9 +37,11 @@ None. This skill has zero cost — all data comes from a free public API. No sBT
 
 ## Whale Alert Thresholds
 
-- **Significant move:** > 1,000,000 DOG (1M) in a single transaction
+- **Default threshold:** > 1,000,000 DOG (1M) per transaction — applied by the `/whale-alerts` endpoint
+- **HIGH severity:** Large individual whale move flagged by DOG DATA's classification engine
+- **CRITICAL severity:** Exceptional move — likely top-10 holder or exchange-scale transfer
 - **Major holder change:** Any top-25 holder whose balance changes > 5% between checks
-- **Accumulation signal:** Address receives > 500K DOG within 24 hours across multiple UTXOs
+- **Multi-chain context:** Whale alerts cover Bitcoin L1, Stacks, and Solana — always check `chain` field
 
 ## Data Interpretation Guidelines
 
@@ -41,11 +49,29 @@ None. This skill has zero cost — all data comes from a free public API. No sBT
 - **MVRV > 3.0:** DOG trades well above realized value — overheated. Flag as "distribution risk."
 - **LTH % > 75%:** Strong long-term conviction. Supply is locked. Bullish structural signal.
 - **LTH % < 50%:** Weak conviction. Supply is mobile. Higher sell pressure risk.
-- **Retention rate (airdrop):** Currently ~37%. Declining retention = increasing sell pressure from original recipients.
+- **Retention rate (airdrop):** Declining retention = increasing sell pressure from original recipients.
 - **Gini > 0.8:** High concentration — top holders control significant supply. LP risk factor.
+- **Price spread across exchanges > 1%:** Arbitrage opportunity exists. May indicate low liquidity on some venues.
+- **Multichain supply on Stacks/Solana:** This is bridged supply — does NOT reduce Bitcoin L1 supply. Track separately.
+- **Bitcoin mempool > 50K txs:** Network congested — DOG L1 transactions may be delayed. Flag to user.
+- **Fee > 50 sat/vB:** High fee environment. Large DOG transfers become expensive. Advise batching.
+
+## Action Selection Guide
+
+| Situation | Recommended Action |
+|-----------|-------------------|
+| Quick market check | `pulse` |
+| Large move detected / whale alert | `whales` |
+| Narrative / conviction analysis | `diamond` |
+| Historical distribution context | `airdrop` |
+| Supply-side sentiment | `lth-sth` |
+| LP / arbitrage / exchange comparison | `markets` |
+| Cross-chain bridge analysis | `multichain` |
+| Fee planning / transaction timing | `bitcoin` |
 
 ## Cooldowns
 
 - Do not call the same endpoint more than once per 3 minutes (respect 20 req/hr public limit).
 - For autonomous loop integration, one `pulse` per cycle (5 min) is the recommended cadence.
-- `whales` and `diamond` are heavier queries — limit to once per 15 minutes in autonomous mode.
+- `whales`, `diamond`, and `markets` are heavier queries — limit to once per 15 minutes in autonomous mode.
+- `bitcoin` and `multichain` update every 5 minutes on the server side — calling more often returns cached data.

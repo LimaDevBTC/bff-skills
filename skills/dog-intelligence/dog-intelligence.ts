@@ -623,54 +623,46 @@ async function installPacks(): Promise<void> {
 
 // --- Main ---
 
-async function main(): Promise<void> {
-  const command = Bun.argv[2];
-  const actionFlag = Bun.argv.indexOf("--action");
-  const action = actionFlag !== -1 ? Bun.argv[actionFlag + 1] : "pulse";
+import { Command } from "commander";
 
-  switch (command) {
-    case "doctor":
-      await doctor();
-      break;
-    case "run":
-      switch (action) {
-        case "pulse":
-          await pulse();
-          break;
-        case "whales":
-          await whales();
-          break;
-        case "diamond":
-          await diamond();
-          break;
-        case "airdrop":
-          await airdrop();
-          break;
-        case "lth-sth":
-          await lthSth();
-          break;
-        case "markets":
-          await markets();
-          break;
-        case "multichain":
-          await multichain();
-          break;
-        case "bitcoin":
-          await bitcoin();
-          break;
-        default:
-          out("error", "Unknown action", null, `Unknown action: ${action}. Valid: pulse, whales, diamond, airdrop, lth-sth, markets, multichain, bitcoin`);
-      }
-      break;
-    case "install-packs":
-      await installPacks();
-      break;
-    default:
-      out("error", "Unknown command", null, `Unknown command: ${command}. Valid: doctor, run, install-packs`);
-  }
-}
+const program = new Command();
+program
+  .name("dog-intelligence")
+  .description("On-chain intelligence for DOG•GO•TO•THE•MOON rune (read-only)")
+  .version("0.1.0");
 
-main().catch((err) => {
+program
+  .command("doctor")
+  .description("Probe DOG DATA API health + endpoint reachability")
+  .action(async () => { await doctor(); });
+
+program
+  .command("install-packs")
+  .description("Report optional env vars and rate-limit tiers")
+  .action(async () => { await installPacks(); });
+
+program
+  .command("run")
+  .description("Run a read-only intelligence action")
+  .requiredOption("--action <name>", "pulse | whales | diamond | airdrop | lth-sth | markets | multichain | bitcoin")
+  .action(async (opts: { action: string }) => {
+    switch (opts.action) {
+      case "pulse":      await pulse();      break;
+      case "whales":     await whales();     break;
+      case "diamond":    await diamond();    break;
+      case "airdrop":    await airdrop();    break;
+      case "lth-sth":    await lthSth();     break;
+      case "markets":    await markets();    break;
+      case "multichain": await multichain(); break;
+      case "bitcoin":    await bitcoin();    break;
+      default:
+        out("error", "Unknown action", null,
+          `Unknown action: ${opts.action}. Valid: pulse, whales, diamond, airdrop, lth-sth, markets, multichain, bitcoin`);
+        process.exit(1);
+    }
+  });
+
+program.parseAsync(process.argv).catch((err) => {
   out("error", "Fatal error", null, err instanceof Error ? err.message : String(err));
   process.exit(1);
 });

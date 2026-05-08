@@ -33,6 +33,12 @@ interface Output {
   timestamp: string;
 }
 
+// Round a number to N decimals, preserving 0. Returns null only for non-numbers
+// (typeof check avoids the truthy-null trap where `0 ? ... : null` returns null).
+function num(x: unknown, decimals = 2): number | null {
+  return typeof x === "number" && Number.isFinite(x) ? +x.toFixed(decimals) : null;
+}
+
 function out(status: Output["status"], action: string, data: Output["data"], error: string | null = null): void {
   const result: Output = {
     status,
@@ -197,10 +203,14 @@ async function pulse(): Promise<void> {
       volume_usd: Math.round((t.volumeUsd as number) || 0),
     }));
 
+  const lthSthRatio = typeof lthPct === "number" && typeof sthPct === "number" && sthPct !== 0
+    ? +(lthPct / sthPct).toFixed(2)
+    : null;
+
   out("success", "DOG pulse snapshot. Use this data for market analysis and signal generation.", {
     price: {
       usd: currentPrice,
-      change_24h_pct: change24hPct ? +change24hPct.toFixed(2) : null,
+      change_24h_pct: num(change24hPct, 2),
       total_volume_usd: Math.round(totalVolumeUsd),
       exchange_count: exchangeCount,
       top_exchanges: topExchanges,
@@ -215,16 +225,16 @@ async function pulse(): Promise<void> {
       mvrv_signal: mvrvSignal,
     },
     conviction: {
-      lth_percentage: lthPct ? +lthPct.toFixed(2) : null,
-      sth_percentage: sthPct ? +sthPct.toFixed(2) : null,
-      lth_sth_ratio: lthPct && sthPct ? +(lthPct / sthPct).toFixed(2) : null,
-      median_utxo_age_days: utxoAge?.median_age_days ? +(utxoAge.median_age_days as number).toFixed(1) : null,
+      lth_percentage: num(lthPct, 2),
+      sth_percentage: num(sthPct, 2),
+      lth_sth_ratio: lthSthRatio,
+      median_utxo_age_days: num(utxoAge?.median_age_days, 1),
     },
     forensic: {
       diamond_paws: (forensicStats?.by_pattern as Record<string, number>)?.diamond_paws ?? forensicStats?.diamond_hands ?? null,
       dog_legends: (forensicStats?.by_pattern as Record<string, number>)?.dog_legend ?? null,
       paper_hands: (forensicStats?.by_pattern as Record<string, number>)?.paper_hands ?? null,
-      retention_rate_pct: forensicStats?.retention_rate ? +(forensicStats.retention_rate as number).toFixed(2) : null,
+      retention_rate_pct: num(forensicStats?.retention_rate, 2),
       total_analyzed: forensicStats?.total_analyzed ?? null,
     },
   });
@@ -320,9 +330,9 @@ async function diamond(): Promise<void> {
       total_analyzed: stats?.total_analyzed ?? null,
       still_holding: stats?.still_holding ?? null,
       sold_everything: stats?.sold_everything ?? null,
-      retention_rate_pct: stats?.retention_rate ? +(stats.retention_rate as number).toFixed(2) : null,
-      accumulator_rate_pct: stats?.accumulator_rate ? +(stats.accumulator_rate as number).toFixed(2) : null,
-      dumper_rate_pct: stats?.dumper_rate ? +(stats.dumper_rate as number).toFixed(2) : null,
+      retention_rate_pct: num(stats?.retention_rate, 2),
+      accumulator_rate_pct: num(stats?.accumulator_rate, 2),
+      dumper_rate_pct: num(stats?.dumper_rate, 2),
     },
     categories: {
       diamond_paws: patterns?.diamond_paws ?? null,
@@ -406,50 +416,52 @@ async function lthSth(): Promise<void> {
 
   const lthPct = utxoAge?.lth_percentage as number | null;
   const sthPct = utxoAge?.sth_percentage as number | null;
-  const lthSthRatio = lthPct && sthPct && sthPct > 0 ? lthPct / sthPct : null;
+  const lthSthRatio = typeof lthPct === "number" && typeof sthPct === "number" && sthPct > 0
+    ? +(lthPct / sthPct).toFixed(2)
+    : null;
 
   // Interpret
   let convictionSignal = "neutral";
-  if (lthPct !== null) {
+  if (typeof lthPct === "number") {
     if (lthPct > 75) convictionSignal = "strong — majority of supply in long-term hands, structurally bullish";
     else if (lthPct > 50) convictionSignal = "moderate — more holders are long-term than short-term";
     else convictionSignal = "weak — short-term holders dominate, higher sell pressure risk";
   }
 
-  // HODL waves
+  // HODL waves — store as numeric percentages (consistent with other percentage fields)
   const ageDist = utxoAge?.age_distribution as Record<string, number> | undefined;
-  const totalSupplyRaw = utxoAge?.total_supply as number ?? 1;
-  const hodlWaves: Record<string, string> = {};
+  const totalSupplyRaw = (utxoAge?.total_supply as number) ?? 1;
+  const hodlWaves: Record<string, number> = {};
   if (ageDist) {
     for (const [range, supply] of Object.entries(ageDist)) {
-      hodlWaves[range] = ((supply / totalSupplyRaw) * 100).toFixed(2) + "%";
+      hodlWaves[range] = +((supply / totalSupplyRaw) * 100).toFixed(2);
     }
   }
 
   out("success", "LTH vs STH conviction analysis — the trademark DOG intelligence metric.", {
     lth_vs_sth: {
-      lth_percentage: lthPct ? +lthPct.toFixed(2) : null,
-      sth_percentage: sthPct ? +sthPct.toFixed(2) : null,
-      lth_sth_ratio: lthSthRatio ? +lthSthRatio.toFixed(2) : null,
+      lth_percentage: num(lthPct, 2),
+      sth_percentage: num(sthPct, 2),
+      lth_sth_ratio: lthSthRatio,
       conviction_signal: convictionSignal,
       lth_threshold_days: 155,
     },
     utxo_age: {
       total_utxos: utxoAge?.total_utxos ?? null,
-      avg_age_days: utxoAge?.avg_age_days ? +(utxoAge.avg_age_days as number).toFixed(1) : null,
-      median_age_days: utxoAge?.median_age_days ? +(utxoAge.median_age_days as number).toFixed(1) : null,
+      avg_age_days: num(utxoAge?.avg_age_days, 1),
+      median_age_days: num(utxoAge?.median_age_days, 1),
     },
     hodl_waves: hodlWaves,
     concentration: {
-      gini_coefficient: concentration?.gini_coefficient ? +(concentration.gini_coefficient as number).toFixed(4) : null,
-      top_10_pct: concentration?.top10_supply_pct ? +(concentration.top10_supply_pct as number).toFixed(2) : null,
-      top_100_pct: concentration?.top100_supply_pct ? +(concentration.top100_supply_pct as number).toFixed(2) : null,
-      top_1000_pct: concentration?.top1000_supply_pct ? +(concentration.top1000_supply_pct as number).toFixed(2) : null,
+      gini_coefficient: num(concentration?.gini_coefficient, 4),
+      top_10_pct: num(concentration?.top10_supply_pct, 2),
+      top_100_pct: num(concentration?.top100_supply_pct, 2),
+      top_1000_pct: num(concentration?.top1000_supply_pct, 2),
       total_holders: concentration?.total_holders ?? null,
     },
     supply_health: {
-      in_profit_pct: profitLoss?.supply_in_profit_pct ? +(profitLoss.supply_in_profit_pct as number).toFixed(2) : null,
-      in_loss_pct: profitLoss?.supply_in_loss_pct ? +(profitLoss.supply_in_loss_pct as number).toFixed(2) : null,
+      in_profit_pct: num(profitLoss?.supply_in_profit_pct, 2),
+      in_loss_pct: num(profitLoss?.supply_in_loss_pct, 2),
       current_price_usd: profitLoss?.current_price ?? null,
     },
   });
@@ -500,7 +512,7 @@ async function markets(): Promise<void> {
       total_volume_usd_24h: Math.round(totalVolumeUsd),
       highest_price_usd: highestPrice,
       lowest_price_usd: lowestPrice,
-      price_spread_pct: spread ? +spread.toFixed(4) : null,
+      price_spread_pct: num(spread, 4),
       high_24h_kraken: high24h,
       low_24h_kraken: low24h,
       open_24h_kraken: open24h,
@@ -525,10 +537,10 @@ async function multichain(): Promise<void> {
     chain: c.chain,
     symbol: c.symbol,
     price_usd: c.price_usd,
-    price_change_24h_pct: c.price_change_24h ? +(c.price_change_24h as number).toFixed(2) : null,
-    market_cap_usd: c.market_cap_usd ? Math.round(c.market_cap_usd as number) : null,
-    volume_24h_usd: c.volume_24h_usd ? Math.round(c.volume_24h_usd as number) : null,
-    liquidity_usd: c.liquidity_usd ? Math.round(c.liquidity_usd as number) : null,
+    price_change_24h_pct: num(c.price_change_24h, 2),
+    market_cap_usd: typeof c.market_cap_usd === "number" ? Math.round(c.market_cap_usd) : null,
+    volume_24h_usd: typeof c.volume_24h_usd === "number" ? Math.round(c.volume_24h_usd) : null,
+    liquidity_usd: typeof c.liquidity_usd === "number" ? Math.round(c.liquidity_usd) : null,
     holder_count: c.holder_count,
     circulating_supply: c.circulating_supply,
     contract: c.address,
@@ -547,8 +559,8 @@ async function multichain(): Promise<void> {
   out("success", "Cross-chain DOG intelligence. Stacks and Solana bridged supply overview.", {
     aggregate: {
       total_holders_all_chains: statsData?.total_holders ?? null,
-      total_market_cap_usd: statsData?.total_market_cap_usd ? Math.round(statsData.total_market_cap_usd as number) : null,
-      total_volume_24h_usd: statsData?.total_volume_24h_usd ? Math.round(statsData.total_volume_24h_usd as number) : null,
+      total_market_cap_usd: typeof statsData?.total_market_cap_usd === "number" ? Math.round(statsData.total_market_cap_usd) : null,
+      total_volume_24h_usd: typeof statsData?.total_volume_24h_usd === "number" ? Math.round(statsData.total_volume_24h_usd) : null,
       total_supply_all_chains: statsData?.total_supply_all_chains ?? null,
       last_updated: statsData?.last_updated ?? null,
     },
@@ -560,6 +572,10 @@ async function multichain(): Promise<void> {
 async function bitcoin(): Promise<void> {
   const btcData = await get("/bitcoin");
   if (!btcData.ok) {
+    if (btcData.status === 429) {
+      out("blocked", "rate_limited", null, `Rate limited on /bitcoin. Retry after ${btcData.retryAfter ?? 60}s.`);
+      return;
+    }
     out("error", "bitcoin", null, `Failed to fetch Bitcoin network data: HTTP ${btcData.status}`);
     return;
   }
@@ -574,7 +590,7 @@ async function bitcoin(): Promise<void> {
 
   // Current hashrate in EH/s
   const currentHashrateRaw = hashrate?.currentHashrate as number | null;
-  const currentHashrateEH = currentHashrateRaw ? currentHashrateRaw / 1e18 : null;
+  const currentHashrateEH = typeof currentHashrateRaw === "number" ? currentHashrateRaw / 1e18 : null;
 
   // Fee recommendations
   const feeRec = fees?.recommended as Record<string, unknown> | undefined;
@@ -583,12 +599,12 @@ async function bitcoin(): Promise<void> {
     network: {
       latest_block: latestBlock?.height ?? null,
       latest_block_time: latestBlock?.timestamp ?? null,
-      hashrate_eh_s: currentHashrateEH ? +currentHashrateEH.toFixed(2) : null,
-      difficulty: hashrate?.currentDifficulty ? +(hashrate.currentDifficulty as number).toFixed(0) : null,
+      hashrate_eh_s: num(currentHashrateEH, 2),
+      difficulty: num(hashrate?.currentDifficulty, 0),
     },
     difficulty_adjustment: {
-      progress_pct: diff?.progressPercent ? +(diff.progressPercent as number).toFixed(2) : null,
-      estimated_change_pct: diff?.difficultyChange ? +(diff.difficultyChange as number).toFixed(2) : null,
+      progress_pct: num(diff?.progressPercent, 2),
+      estimated_change_pct: num(diff?.difficultyChange, 2),
       blocks_remaining: diff?.remainingBlocks ?? null,
       next_retarget_height: diff?.nextRetargetHeight ?? null,
     },
